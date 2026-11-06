@@ -51,14 +51,15 @@ function event()
                                  "(%d, '%s', '%s')",
                               table_name, k_val, c_val, pad_val))
    else
-      if (sysbench.opt.auto_inc) then
+      if (sysbench.opt.auto_inc and drv:name() ~= "turborel") then
          i = 0
       else
          -- Convert a uint32_t value to SQL INT
          i = sysbench.rand.unique() - 2147483648
       end
 
-      con:query(string.format("INSERT INTO %s (id, k, c, pad) VALUES " ..
+      con:query(string.format("INSERT INTO %s (id, k, c, " ..
+                                 pad_column(drv) .. ") VALUES " ..
                                  "(%d, %d, '%s', '%s')",
                               table_name, i, k_val, c_val, pad_val))
    end

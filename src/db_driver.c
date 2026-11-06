@@ -103,6 +103,9 @@ int db_register(void)
 #ifdef USE_PGSQL
   register_driver_pgsql(&drivers);
 #endif
+#ifdef USE_TURBOREL
+  register_driver_turborel(&drivers);
+#endif
 
   /* Register command line options for each driver */
   SB_LIST_FOR_EACH(pos, &drivers)

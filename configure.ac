@@ -143,6 +143,17 @@ AS_IF([test "x$with_pgsql" != "xno"],
    [pgsql_support=no])
 AC_MSG_RESULT([$pgsql_support])
 
+# Check if we should compile with turborel support
+AC_ARG_WITH([turborel],
+            AS_HELP_STRING([--with-turborel],
+                           [compile with turborel support, which needs no client library (default is enabled)]),
+            [], [with_turborel=yes])
+AC_MSG_CHECKING([whether to compile with turborel support])
+AS_IF([test "x$with_turborel" != "xno"],
+   [turborel_support=yes],
+   [turborel_support=no])
+AC_MSG_RESULT([$turborel_support])
+
 # Set LuaJIT flags
 SB_LUAJIT
 
@@ -199,6 +210,13 @@ AS_IF([test x$with_pgsql != xno], [
 ])
 AM_CONDITIONAL(USE_PGSQL, test x$with_pgsql != xno)
 AC_SUBST([USE_PGSQL])
+
+AS_IF([test x$with_turborel != xno], [
+    USE_TURBOREL=1
+    AC_DEFINE(USE_TURBOREL,1,[Define to 1 if you want to compile with turborel support])
+])
+AM_CONDITIONAL(USE_TURBOREL, test x$with_turborel != xno)
+AC_SUBST([USE_TURBOREL])
 
 # Check for libaio
 AC_CHECK_AIO
@@ -400,6 +418,7 @@ src/Makefile
 src/drivers/Makefile
 src/drivers/mysql/Makefile
 src/drivers/pgsql/Makefile
+src/drivers/turborel/Makefile
 src/tests/Makefile
 src/tests/cpu/Makefile
 src/tests/fileio/Makefile
@@ -430,6 +449,7 @@ AC_MSG_RESULT([datadir            : $(eval echo ${datadir})])
 AC_MSG_RESULT([])
 AC_MSG_RESULT([MySQL support      : ${mysql_support}])
 AC_MSG_RESULT([PostgreSQL support : ${pgsql_support}])
+AC_MSG_RESULT([turborel support   : ${turborel_support}])
 AC_MSG_RESULT([])
 AC_MSG_RESULT([LuaJIT             : ${sb_use_luajit}])
 AC_MSG_RESULT([LUAJIT_CFLAGS      : ${LUAJIT_CFLAGS}])

@@ -280,6 +280,37 @@ sysbench provides a number of algorithms to generate random numbers that are dis
 `--rand-pareto-h` | shape parameter for the Pareto distribution | 0.2
 `--rand-zipfian-exp` | shape parameter (theta) for the Zipfian distribution | 0.8
 
+# turborel
+
+sysbench speaks turborel's native protocol directly, so it builds with no
+client library. `--without-turborel` leaves the driver out. The OLTP scripts run
+as they do on other servers, with these differences:
+
+- turborel has no identity columns, so pass `--auto_inc=off`. Do the same on the
+  server you compare it with, so both run one workload.
+- `prepare` makes the connected user's schema if it has none.
+- The `pad` column is quoted, since turborel reserves that word.
+
+Without `--turborel-password` the driver logs in by trust, which needs
+`SERVER.TRUST_LOCAL` to be `ON`. With one it sends the password whole, which the
+server takes over a Unix socket only, so pass `--turborel-socket` too. TLS and
+SCRAM are not implemented.
+
+``` shell
+    turboreld --dir db --set SERVER.TRUST_LOCAL=ON
+    sysbench --db-driver=turborel --auto_inc=off --tables=4 --table-size=100000 oltp_read_write prepare
+    sysbench --db-driver=turborel --auto_inc=off --tables=4 --table-size=100000 --threads=8 --time=60 oltp_read_write run
+```
+
+`--turborel-isolation` sets the level of each transaction, `READ COMMITTED` by
+default. turborel starts a transaction implicitly and has no autocommit, so the
+driver turns `BEGIN` into `SET TRANSACTION`, and sends `COMMIT` with any statement
+run outside a transaction. Each costs the one round trip it costs elsewhere.
+
+turborel refuses a row's second writer at once, where PostgreSQL's READ
+COMMITTED makes it wait. Contended workloads therefore show these as `ignored
+errors`, run again, rather than as latency.
+
 # Versioning
 
 For transparency and insight into its release cycle, and for striving to maintain backward compatibility, sysbench will be maintained under the Semantic Versioning guidelines as much as possible.

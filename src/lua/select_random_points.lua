@@ -36,10 +36,10 @@ function thread_init()
    local points = string.rep("?, ", sysbench.opt.random_points - 1) .. "?"
 
    stmt = con:prepare(string.format([[
-        SELECT id, k, c, pad
+        SELECT id, k, c, %s
           FROM sbtest1
           WHERE k IN (%s)
-        ]], points))
+        ]], pad_column(drv), points))
 
    params = {}
    for j = 1, sysbench.opt.random_points do

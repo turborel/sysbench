@@ -154,9 +154,48 @@ function get_pad_value()
    return sysbench.rand.string(pad_value_template)
 end
 
+-- The column of padding, which SQL-92 reserves as a word in turborel.
+function pad_column(drv)
+   return drv:name() == "turborel" and '"pad"' or "pad"
+end
+
+-- Makes the schema of the connected user in turborel, where no table can be
+-- made without one. Other servers need no such step.
+local function create_schema(drv, con)
+   if drv:name() ~= "turborel" then
+      return
+   end
+
+   local user = con:query_row("SELECT DISTINCT CURRENT_USER " ..
+                                 "FROM INFORMATION_SCHEMA.SETTINGS")
+   local found = con:query_row(string.format(
+      "SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA " ..
+      "WHERE SCHEMA_NAME = '%s'", user))
+
+   if tonumber(found) == 0 then
+      con:query("CREATE SCHEMA AUTHORIZATION " .. user)
+   end
+end
+
+local function drop_table(drv, con, table_num)
+   if drv:name() ~= "turborel" then
+      con:query("DROP TABLE IF EXISTS sbtest" .. table_num)
+      return
+   end
+
+   local found = con:query_row(string.format(
+      "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES " ..
+      "WHERE TABLE_NAME = 'SBTEST%d'", table_num))
+
+   if tonumber(found) > 0 then
+      con:query("DROP TABLE sbtest" .. table_num .. " CASCADE")
+   end
+end
+
 function create_table(drv, con, table_num)
    local id_index_def, id_def
    local engine_def = ""
+   local k_default = "'0'"
    local extra_table_options = ""
    local query
 
@@ -183,6 +222,14 @@ function create_table(drv, con, table_num)
       else
         id_def = "SERIAL"
       end
+   elseif drv:name() == "turborel"
+   then
+      create_schema(drv, con)
+
+      -- turborel has no identity columns, so ids come from the client.
+      sysbench.opt.auto_inc = false
+      id_def = "INTEGER NOT NULL"
+      k_default = "0"
    else
       error("Unsupported database driver:" .. drv:name())
    end
@@ -192,12 +239,12 @@ function create_table(drv, con, table_num)
    query = string.format([[
 CREATE TABLE sbtest%d(
   id %s,
-  k INTEGER DEFAULT '0' NOT NULL,
+  k INTEGER DEFAULT %s NOT NULL,
   c CHAR(120) DEFAULT '' NOT NULL,
-  pad CHAR(60) DEFAULT '' NOT NULL,
+  %s CHAR(60) DEFAULT '' NOT NULL,
   %s (id)
 ) %s %s]],
-      table_num, id_def, id_index_def, engine_def,
+      table_num, id_def, k_default, pad_column(drv), id_index_def, engine_def,
       sysbench.opt.create_table_options)
 
    con:query(query)
@@ -208,9 +255,11 @@ CREATE TABLE sbtest%d(
    end
 
    if sysbench.opt.auto_inc then
-      query = "INSERT INTO sbtest" .. table_num .. "(k, c, pad) VALUES"
+      query = "INSERT INTO sbtest" .. table_num .. "(k, c, " ..
+         pad_column(drv) .. ") VALUES"
    else
-      query = "INSERT INTO sbtest" .. table_num .. "(id, k, c, pad) VALUES"
+      query = "INSERT INTO sbtest" .. table_num .. "(id, k, c, " ..
+         pad_column(drv) .. ") VALUES"
    end
 
    con:bulk_insert_init(query)
@@ -274,7 +323,7 @@ local stmt_defs = {
       "DELETE FROM sbtest%u WHERE id=?",
       t.INT},
    inserts = {
-      "INSERT INTO sbtest%u (id, k, c, pad) VALUES (?, ?, ?, ?)",
+      "INSERT INTO sbtest%u (id, k, c, %s) VALUES (?, ?, ?, ?)",
       t.INT, t.INT, {t.CHAR, 120}, {t.CHAR, 60}},
 }
 
@@ -288,7 +337,8 @@ end
 
 function prepare_for_each_table(key)
    for t = 1, sysbench.opt.tables do
-      stmt[t][key] = con:prepare(string.format(stmt_defs[key][1], t))
+      stmt[t][key] = con:prepare(string.format(stmt_defs[key][1], t,
+                                               pad_column(drv)))
 
       local nparam = #stmt_defs[key] - 1
 
@@ -396,7 +446,7 @@ function cleanup()
 
    for i = 1, sysbench.opt.tables do
       print(string.format("Dropping table 'sbtest%d'...", i))
-      con:query("DROP TABLE IF EXISTS sbtest" .. i )
+      drop_table(drv, con, i)
    end
 end
 
