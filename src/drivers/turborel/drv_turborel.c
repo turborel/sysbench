@@ -25,8 +25,9 @@
   statement, as in SQL-92, and lasts until COMMIT. sysbench expects BEGIN and
   autocommit, so this driver provides them. BEGIN sends SET TRANSACTION with
   the level of --turborel-isolation, so a transaction costs the same round
-  trip it costs on other servers. A statement outside BEGIN is followed by a
-  COMMIT in the same write, so it costs one round trip too.
+  trip it costs on other servers. A statement outside BEGIN asks the server
+  to end the transaction with it (the request's last byte), so it costs one
+  round trip and one reply too.
 
   TLS and SCRAM are not implemented. Without a password the driver logs in by
   trust, which needs SERVER.TRUST_LOCAL = ON. With one it sends the password
@@ -132,6 +133,7 @@ typedef struct
 typedef enum
 {
   TB_KIND_OTHER,
+  TB_KIND_QUERY,
   TB_KIND_WRITE,
   TB_KIND_BEGIN,
   TB_KIND_COMMIT,
@@ -533,18 +535,22 @@ static int read_complete(db_conn_t *con)
 
 /*
   Reads the reply to a statement that may give rows. rows and nfields are its
-  results, and sqlcode the SQLCODE of its completion.
+  results, and sqlcode the SQLCODE of its completion. is_query says on entry
+  whether a prepared statement is a query, whose rows come with no
+  Description (its columns came with Prepared): their count is then read
+  from the first row.
 */
 static db_error_t read_reply(db_conn_t *con, int *sqlcode, uint32_t *rows,
                              uint32_t *nfields, int *is_query)
 {
   tb_conn_t   *c = con->ptr;
   tb_reader_t body;
+  tb_reader_t first;
+  uint32_t    in_frame;
   uint8_t     kind;
 
   *rows = 0;
   *nfields = 0;
-  *is_query = 0;
 
   for (;;)
   {
@@ -558,7 +564,13 @@ static db_error_t read_reply(db_conn_t *con, int *sqlcode, uint32_t *rows,
         break;
 
       case TB_R_ROWS:
-        *rows += take_u32(&body);
+        in_frame = take_u32(&body);
+        *rows += in_frame;
+        if (*nfields == 0 && in_frame > 0)
+        {
+          first = body;
+          *nfields = take_u32(&first);
+        }
         body.p -= 4;
         if (put_bytes(&c->result.rows, body.p, (size_t) (body.end - body.p)))
           return DB_ERROR_FATAL;
@@ -856,6 +868,8 @@ static tb_kind_t kind_of(const char *sql)
   if (starts_with(sql, "INSERT") || starts_with(sql, "UPDATE") ||
       starts_with(sql, "DELETE"))
     return TB_KIND_WRITE;
+  if (starts_with(sql, "SELECT"))
+    return TB_KIND_QUERY;
 
   return TB_KIND_OTHER;
 }
@@ -897,6 +911,7 @@ int turborel_drv_prepare(db_stmt_t *stmt, const char *query, size_t len)
       break;
 
     case TB_KIND_WRITE:
+    case TB_KIND_QUERY:
     case TB_KIND_OTHER:
       ts->id = c->next_stmt++;
       put_prepare(c, ts->id, query, len);
@@ -1007,9 +1022,12 @@ static int put_value(tb_buf_t *b, const db_bind_t *v)
   }
 }
 
-/* Requests the execution of a prepared statement, of all its rows */
+/*
+  Requests the execution of a prepared statement, of all its rows; the
+  transaction ended with it if ends
+*/
 static int put_execute(tb_conn_t *c, uint32_t id, const db_bind_t *values,
-                       size_t count)
+                       size_t count, int ends)
 {
   const size_t at = frame_begin(&c->out, TB_EXECUTE);
   size_t       i;
@@ -1020,9 +1038,16 @@ static int put_execute(tb_conn_t *c, uint32_t id, const db_bind_t *values,
     if (put_value(&c->out, values + i))
       return 1;
   put_u32(&c->out, 0);
+  put_u8(&c->out, (uint8_t) (ends != 0));
   frame_end(&c->out, at);
 
   return 0;
+}
+
+/* Whether a statement of kind outside BEGIN ends its transaction with it */
+static int ends_with(const tb_conn_t *c, tb_kind_t kind)
+{
+  return !c->in_tx && kind != TB_KIND_COMMIT && kind != TB_KIND_ROLLBACK;
 }
 
 /* Rolls back after a failure, and ends the transaction it was in */
@@ -1032,7 +1057,7 @@ static int rollback(db_conn_t *con)
 
   c->in_tx = 0;
 
-  return put_execute(c, TB_STMT_ROLLBACK, NULL, 0) || send_all(c) ||
+  return put_execute(c, TB_STMT_ROLLBACK, NULL, 0, 0) || send_all(c) ||
     read_complete(con);
 }
 
@@ -1042,18 +1067,12 @@ static db_error_t finish(db_conn_t *con, db_result_t *rs, tb_kind_t kind,
 {
   tb_conn_t  *c = con->ptr;
   int        sqlcode = 0;
-  int        is_query;
+  int        is_query = (kind == TB_KIND_QUERY);
   uint32_t   rows;
   uint32_t   nfields;
   db_error_t rc;
 
   rc = read_reply(con, &sqlcode, &rows, &nfields, &is_query);
-
-  /* The COMMIT sent with a statement outside a transaction */
-  if (rc != DB_ERROR_FATAL && !c->in_tx && kind != TB_KIND_COMMIT &&
-      kind != TB_KIND_ROLLBACK && read_complete(con) &&
-      rc == DB_ERROR_NONE)
-    rc = DB_ERROR_IGNORABLE;
 
   if (rc == DB_ERROR_NONE)
   {
@@ -1116,7 +1135,7 @@ static void clear_failure(db_conn_t *con)
 
 /*
   Executes a statement of the kinds the driver handles by number. A statement
-  outside a transaction takes its COMMIT with it, in one write.
+  outside a transaction ends it with the statement, in one request.
 */
 static db_error_t execute_numbered(db_stmt_t *stmt, db_result_t *rs)
 {
@@ -1130,16 +1149,14 @@ static db_error_t execute_numbered(db_stmt_t *stmt, db_result_t *rs)
   note_transaction(c, ts->kind);
 
   if (put_execute(c, ts->id, stmt->bound_param,
-                  (ts->kind == TB_KIND_WRITE || ts->kind == TB_KIND_OTHER) ?
-                  stmt->bound_param_len : 0))
+                  (ts->kind == TB_KIND_WRITE || ts->kind == TB_KIND_QUERY ||
+                   ts->kind == TB_KIND_OTHER) ? stmt->bound_param_len : 0,
+                  ends_with(c, ts->kind)))
   {
     log_text(LOG_FATAL, "cannot encode a parameter");
     c->out.len = 0;
     return DB_ERROR_FATAL;
   }
-
-  if (!c->in_tx && ts->kind != TB_KIND_COMMIT && ts->kind != TB_KIND_ROLLBACK)
-    put_execute(c, TB_STMT_COMMIT, NULL, 0);
 
   if (send_all(c))
     return DB_ERROR_FATAL;
@@ -1213,17 +1230,15 @@ db_error_t turborel_drv_query(db_conn_t *sb_conn, const char *query,
 
   if (kind == TB_KIND_BEGIN)
   {
-    put_execute(c, TB_STMT_BEGIN, NULL, 0);
+    put_execute(c, TB_STMT_BEGIN, NULL, 0, 0);
   }
   else
   {
     at = frame_begin(&c->out, TB_QUERY);
     put_str(&c->out, query, len);
+    put_u8(&c->out, (uint8_t) (ends_with(c, kind) != 0));
     frame_end(&c->out, at);
   }
-
-  if (!c->in_tx && kind != TB_KIND_COMMIT && kind != TB_KIND_ROLLBACK)
-    put_execute(c, TB_STMT_COMMIT, NULL, 0);
 
   if (send_all(c))
     return DB_ERROR_FATAL;
