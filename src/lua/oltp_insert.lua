@@ -46,12 +46,14 @@ function event()
    local c_val = get_c_value()
    local pad_val = get_pad_value()
 
-   if (drv:name() == "pgsql" and sysbench.opt.auto_inc) then
-      con:query(string.format("INSERT INTO %s (k, c, pad) VALUES " ..
+   if ((drv:name() == "pgsql" or drv:name() == "turborel") and
+       sysbench.opt.auto_inc) then
+      con:query(string.format("INSERT INTO %s (k, c, " ..
+                                 pad_column(drv) .. ") VALUES " ..
                                  "(%d, '%s', '%s')",
                               table_name, k_val, c_val, pad_val))
    else
-      if (sysbench.opt.auto_inc and drv:name() ~= "turborel") then
+      if (sysbench.opt.auto_inc) then
          i = 0
       else
          -- Convert a uint32_t value to SQL INT
